@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 # Hey, Emacs! This is -*-python-*-.
 #
 # Copyright (C) 2003, 2011-2012 Joel Rosdahl
@@ -26,12 +26,11 @@ import os
 import re
 import select
 import socket
-import string
 import sys
 import tempfile
 import time
 from datetime import datetime
-from optparse import OptionParser
+import logging
 
 
 def create_directory(path):
@@ -161,8 +160,8 @@ class Client(object):
                 if len(x[1]) > 0 and x[1][0] == ":":
                     arguments = [x[1][1:]]
                 else:
-                    y = string.split(x[1], " :", 1)
-                    arguments = string.split(y[0])
+                    y = str.split(x[1], " :", 1)
+                    arguments = str.split(y[0])
                     if len(y) == 2:
                         arguments.append(y[1])
             self.__handle_command(command, arguments)
@@ -234,7 +233,7 @@ class Client(object):
                 self.reply_461("JOIN")
                 return
             if arguments[0] == "0":
-                for (channelname, channel) in self.channels.items():
+                for (channelname, channel) in list(self.channels.items()):
                     self.message_channel(channel, "PART", channelname, True)
                     self.channel_log(channel, "left", meta=True)
                     server.remove_member_from_channel(self, channelname)
@@ -278,7 +277,7 @@ class Client(object):
 
         def list_handler():
             if len(arguments) < 1:
-                channels = server.channels.values()
+                channels = list(server.channels.values())
             else:
                 channels = []
                 for channelname in arguments[0].split(","):
@@ -364,7 +363,7 @@ class Client(object):
                 self.reply("432 %s %s :Erroneous Nickname"
                            % (self.nickname, newnick))
             else:
-                for x in self.channels.values():
+                for x in list(self.channels.values()):
                     self.channel_log(
                         x, "changed nickname to %s" % newnick, meta=True)
                 oldnickname = self.nickname
@@ -467,7 +466,7 @@ class Client(object):
             if len(arguments) < 1:
                 self.reply_461(command)
             message = arguments[0]
-            for client in server.clients.values():
+            for client in list(server.clients.values()):
                 client.message(":%s NOTICE %s :Global notice: %s"
                                % (self.prefix, client.nickname, message))
 
@@ -538,11 +537,11 @@ class Client(object):
             self.server.print_debug(
                 "[%s:%d] -> %r" % (self.host, self.port, data))
             quitmsg = "EOT"
-        except socket.error, x:
+        except socket.error as x:
             data = ""
             quitmsg = x
         if data:
-            self.__readbuffer += data
+            self.__readbuffer += data.decode()
             self.__parse_read_buffer()
             self.__timestamp = time.time()
             self.__sent_ping = False
@@ -551,12 +550,12 @@ class Client(object):
 
     def socket_writable_notification(self):
         try:
-            sent = self.socket.send(self.__writebuffer)
+            sent = self.socket.send(self.__writebuffer.encode())
             self.server.print_debug(
                 "[%s:%d] <- %r" % (
                     self.host, self.port, self.__writebuffer[:sent]))
             self.__writebuffer = self.__writebuffer[sent:]
-        except socket.error, x:
+        except socket.error as x:
             self.disconnect(x)
 
     def disconnect(self, quitmsg):
@@ -603,7 +602,7 @@ class Client(object):
         clients = set()
         if include_self:
             clients.add(self)
-        for channel in self.channels.values():
+        for channel in list(self.channels.values()):
             clients |= channel.members
         if not include_self:
             clients.discard(self)
@@ -627,11 +626,12 @@ class Server(object):
     def __init__(self, options):
         self.ports = options.ports
         self.password = options.password
-        self.motdfile = options.motd
+        self.motd = options.motd
         self.verbose = options.verbose
         self.debug = options.debug
         self.logdir = options.logdir
         self.statedir = options.statedir
+        self.logger = options.logger
         self.name = socket.getfqdn()[:63]  # Server name limit from the RFC.
         self.channels = {}  # irc_lower(Channel name) --> Channel instance.
         self.clients = {}  # Socket --> Client instance.
@@ -673,31 +673,22 @@ class Server(object):
         if irc_lower(channelname) in self.channels:
             channel = self.channels[irc_lower(channelname)]
         else:
+            self.print_info("Creating Channel: %s" % channelname)
             channel = Channel(self, channelname)
             self.channels[irc_lower(channelname)] = channel
         return channel
 
     def get_motd_lines(self):
-        if self.motdfile:
-            try:
-                return open(self.motdfile).readlines()
-            except IOError:
-                return ["Could not read MOTD file %r." % self.motdfile]
-        else:
-            return []
+        return self.motd.split('\n') if self.motd else []
 
     def print_info(self, msg):
-        if self.verbose:
-            print msg
-            sys.stdout.flush()
+        self.logger.info(msg)
 
     def print_debug(self, msg):
-        if self.debug:
-            print msg
-            sys.stdout.flush()
+        self.logger.debug(msg)
 
     def print_error(self, msg):
-        sys.stderr.write("%s\n" % msg)
+        self.logger.error(msg)
 
     def client_changed_nickname(self, client, oldnickname):
         if oldnickname:
@@ -711,7 +702,7 @@ class Server(object):
 
     def remove_client(self, client, quitmsg):
         client.message_related(":%s QUIT :%s" % (client.prefix, quitmsg))
-        for x in client.channels.values():
+        for x in list(client.channels.values()):
             client.channel_log(x, "quit (%s)" % quitmsg, meta=True)
             x.remove_client(client)
         if client.nickname \
@@ -723,27 +714,30 @@ class Server(object):
         del self.channels[irc_lower(channel.name)]
 
     def start(self):
-        serversockets = []
+        self.serversockets = []
         for port in self.ports:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("", port))
-            except socket.error, x:
+            except socket.error as x:
                 self.print_error("Could not bind port %s: %s." % (port, x))
                 sys.exit(1)
             s.listen(5)
-            serversockets.append(s)
+            self.serversockets.append(s)
             del s
             self.print_info("Listening on port %d." % port)
         last_aliveness_check = time.time()
-        while True:
+        self.doStop = False
+        while not self.doStop:
             (iwtd, owtd, ewtd) = select.select(
-                serversockets + [x.socket for x in self.clients.values()],
-                [x.socket for x in self.clients.values()
+                self.serversockets + [x.socket for x in list(self.clients.values())],
+                [x.socket for x in list(self.clients.values())
                           if x.write_queue_size() > 0],
                 [],
                 10)
+            if self.doStop:
+                break
             for x in iwtd:
                 if x in self.clients:
                     self.clients[x].socket_readable_notification()
@@ -757,22 +751,31 @@ class Server(object):
                     self.clients[x].socket_writable_notification()
             now = time.time()
             if last_aliveness_check + 10 < now:
-                for client in self.clients.values():
+                for client in list(self.clients.values()):
                     client.check_aliveness()
                 last_aliveness_check = now
+        self.print_info("Server stopping")
+        for s in self.serversockets:
+            s.close()
+        for c in self.clients.copy().values():
+            c.disconnect("server stopping")
+
+    def stop(self):
+        self.doStop = True
+        self.serversockets[0].shutdown(socket.SHUT_RD)
 
 
 _alpha = "abcdefghijklmnopqrstuvwxyz"
-_ircstring_translation = string.maketrans(
-    string.upper(_alpha) + "[]\\^",
-    _alpha + "{}|~")
+_ircstring_translation = str.maketrans(str.upper(_alpha) + "[]\\^", _alpha + "{}|~")
 
 
 def irc_lower(s):
-    return string.translate(s, _ircstring_translation)
+    return str.translate(s, _ircstring_translation)
 
 
 def main(argv):
+    from optparse import OptionParser
+
     op = OptionParser(
         version=VERSION,
         description="miniircd is a small and limited IRC server.")
@@ -791,7 +794,7 @@ def main(argv):
     op.add_option(
         "--motd",
         metavar="X",
-        help="display file X as message of the day")
+        help="display X as message of the day")
     op.add_option(
         "-p", "--password",
         metavar="X",
@@ -820,6 +823,7 @@ def main(argv):
         except ValueError:
             op.error("bad port: %r" % port)
     options.ports = ports
+    options.__dict__.update({"logger": logging.getLogger()})
     server = Server(options)
     if options.daemon:
         server.daemonize()
@@ -829,6 +833,9 @@ def main(argv):
         server.print_error("Interrupted.")
 
 
-main(sys.argv)
+
+if __name__ == "__main__":
+    main(sys.argv)
+
 
 # ex:et:sw=4:ts=4
